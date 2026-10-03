@@ -114,24 +114,10 @@ function parseDate(raw: string): Date | null | "invalid" {
   return "invalid";
 }
 
-export const IMPORT_HEADERS = [
-  "admission_no",
-  "first_name",
-  "last_name",
-  "class",
-  "section",
-  "roll_no",
-  "dob",
-  "gender",
-  "category",
-  "address",
-  "guardian_name",
-  "guardian_relation",
-  "guardian_phone",
-  "messaging_consent",
-];
-
-export function parseCsv(text: string): RowResult[] {
+// The accepted columns are documented on the import page, which is
+// where anyone looking for them will be. Order does not matter and
+// unknown columns are ignored — see the header mapping in parseCsv.
+function parseCsv(text: string): RowResult[] {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())

@@ -32,7 +32,10 @@ export function requireText(
   if (!v) return { error: `${field} is required.` };
   if (v.length > max) return { error: `${field} is too long.` };
 
-  return { value };
+  // `{ value }` shorthand here would return the raw parameter, not
+  // the trimmed local. It typechecks in dev (which does not run tsc)
+  // and fails the production build.
+  return { value: v };
 }
 
 // Deliberately loose. Rejecting a real guardian's number is worse than
