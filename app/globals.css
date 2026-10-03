@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/*
+  Design notes — read before changing colours.
+
+  A clerk stares at this for eight hours on an old office desktop.
+  Priorities: legibility, density, speed, and printing. Not polish.
+
+  - No webfonts. A font round-trip on school broadband is a worse trade
+    than the system stack looking plain.
+  - Tabular numerals everywhere. Fee columns must align or nobody
+    trusts the total.
+  - One accent (indigo), reserved for the primary action on a screen.
+  - Money that is owed is the only thing allowed to be red. If
+    everything is coloured, the overdue column stops meaning anything.
+  - Depth is one hairline border plus a very soft shadow, on panels
+    only. No shadows on rows, buttons or inputs.
+*/
+
+@theme {
+  --color-page: #fbfbfc;
+  --color-panel: #ffffff;
+  --color-surface: #f2f3f6;
+  --color-ink: #1a1c23;
+  --color-muted: #5f6472;
+  --color-faint: #8d93a1;
+  --color-line: #e0e2e8;
+
+  --color-accent: #3d4db5;
+  --color-accent-ink: #2c3989;
+  --color-accent-wash: #eceEf9;
+
+  --color-due: #a53030;
+  --color-warn: #a5690c;
+  --color-good: #1f6b4a;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  --shadow-panel: 0 1px 2px rgba(26, 28, 35, 0.04);
+}
+
+html,
+body {
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Clerks work by keyboard. Focus must be unmissable. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea {
+  background: var(--color-panel);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  @page {
+    margin: 12mm;
+  }
+}

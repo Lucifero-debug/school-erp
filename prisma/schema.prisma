@@ -1,0 +1,897 @@
+// prisma/schema.prisma
+//
+// School / college ERP. See CONTEXT.md §3 for what is deliberately NOT
+// modelled (transport, hostel, library, payroll, LMS, biometrics).
+//
+// FOUR DECISIONS THAT SHAPE EVERYTHING. Do not reverse them casually.
+//
+// 1. MULTI-TENANT. Every table carries schoolId and every query filters
+//    by it. This is children's data; a leak between schools is the worst
+//    thing this software could do.
+//
+// 2. ENROLLMENT IS PER ACADEMIC YEAR. A student's class and section live
+//    on Enrollment, never on Student. Students move up every year, and
+//    last year's attendance, marks and fees must stay attached to last
+//    year's class. Putting classId on Student is the single most common
+//    mistake in school software and it is unrecoverable once there is
+//    history.
+//
+// 3. FEES ARE DEMANDS AND ALLOCATIONS, not a running balance. Every
+//    amount owed is a FeeDemand row; every rupee received is a Receipt
+//    allocated against specific demands. A "balance" column would drift
+//    and nobody could ever explain the difference to a parent.
+//
+// 4. NOTHING IS HARD DELETED. Use deletedAt, cancel, or void. Academic
+//    and financial records get disputed years later.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===============================================================
+// School, years, staff
+// ===============================================================
+
+enum Board {
+  CBSE
+  ICSE
+  STATE
+  IB
+  CAMBRIDGE
+  UNIVERSITY // colleges
+  OTHER
+}
+
+model School {
+  id   String @id @default(cuid())
+  name String
+
+  // UDISE+ code — the government identifier every recognised Indian
+  // school has. Printed on official documents.
+  udiseCode String?
+
+  // Affiliation / recognition number from the board.
+  affiliationNo String?
+  board         Board   @default(CBSE)
+
+  // Colleges set this true; it changes vocabulary in the UI
+  // (class -> programme, section -> batch) and little else.
+  isCollege Boolean @default(false)
+
+  address String
+  city    String
+  state   String
+  pincode String?
+  phone   String
+  email   String?
+
+  timezone String @default("Asia/Kolkata")
+
+  academicYears AcademicYear[]
+  staff         Staff[]
+  students      Student[]
+  klasses       Klass[]
+  subjects      Subject[]
+  feeHeads      FeeHead[]
+  auditLogs     AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Indian academic years run April to March, matching the financial
+// year. Named "2026-27". Exactly one is current at a time.
+model AcademicYear {
+  id       String @id @default(cuid())
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  name      String // "2026-27"
+  startsOn  DateTime
+  endsOn    DateTime
+  isCurrent Boolean  @default(false)
+
+  // Locked years are read-only. Closing a year after results are out
+  // stops someone editing last year's marks or fees by accident.
+  lockedAt DateTime?
+
+  enrollments     Enrollment[]
+  feeStructures   FeeStructure[]
+  feeInstallments FeeInstallment[]
+  exams           Exam[]
+  receipts        Receipt[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([schoolId, name])
+  @@index([schoolId, isCurrent])
+}
+
+enum StaffRole {
+  ADMIN // full access, usually the owner or director
+  PRINCIPAL
+  ACCOUNTANT // fees only
+  TEACHER // own sections only
+  CLERK // admissions and records, no money
+}
+
+model Staff {
+  id       String @id @default(cuid())
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  employeeCode String?
+  name         String
+  phone        String
+  email        String?
+  role         StaffRole
+
+  qualification String?
+  designation   String?
+
+  passwordHash       String?
+  passwordSetByAdmin Boolean @default(false)
+
+  sectionsAsTeacher Section[]     @relation("ClassTeacher")
+  attendanceMarked  Attendance[]
+  receiptsCollected Receipt[]
+  auditLogs         AuditLog[]
+
+  active    Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([schoolId, phone])
+  @@index([schoolId, role])
+}
+
+// Login throttling. In the database, not memory — serverless functions
+// do not share memory, so an in-memory counter protects nothing.
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  phone     String
+  ip        String?
+  success   Boolean
+  createdAt DateTime @default(now())
+
+  @@index([phone, createdAt])
+  @@index([ip, createdAt])
+}
+
+// ===============================================================
+// Classes and sections
+// ===============================================================
+
+// "Class VIII", or for a college "B.Com Semester 3".
+// `rank` drives ordering and promotion (VIII -> IX is rank 8 -> 9).
+model Klass {
+  id       String @id @default(cuid())
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  name String // "VIII", "B.Com Sem 3"
+  rank Int // sort order, and the promotion sequence
+
+  sections      Section[]
+  feeStructures FeeStructure[]
+  examPapers    ExamPaper[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([schoolId, name])
+  @@index([schoolId, rank])
+}
+
+model Section {
+  id      String @id @default(cuid())
+  klassId String
+  klass   Klass  @relation(fields: [klassId], references: [id])
+
+  name     String // "A", "B", "Commerce"
+  capacity Int?
+
+  classTeacherId String?
+  classTeacher   Staff?  @relation("ClassTeacher", fields: [classTeacherId], references: [id])
+
+  enrollments Enrollment[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([klassId, name])
+}
+
+model Subject {
+  id       String @id @default(cuid())
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  name String
+  code String?
+
+  // CBSE splits scholastic (marked) from co-scholastic (graded:
+  // work education, art, health). Report cards print them separately.
+  isScholastic Boolean @default(true)
+
+  papers ExamPaper[]
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([schoolId, name])
+}
+
+// ===============================================================
+// Students
+// ===============================================================
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum StudentStatus {
+  ACTIVE
+  LEFT // TC issued
+  PASSED_OUT
+  STRUCK_OFF // long absence, fees unpaid
+}
+
+model Student {
+  id       String @id @default(cuid())
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  // The admission number is the school's permanent identifier for a
+  // child. It never changes and never gets reused. Everyone — parents,
+  // clerks, the board — speaks in admission numbers.
+  admissionNo String
+
+  // Scholar Register number, a separate legal register in many states.
+  srNo String?
+
+  // APAAR / ABC ID, the national student identifier being rolled out.
+  // Optional, stored only when the guardian provides it.
+  apaarId String?
+
+  firstName String
+  lastName  String?
+
+  dob    DateTime?
+  gender Gender?
+
+  bloodGroup String?
+
+  // Government reporting (UDISE+) asks for these. They are sensitive;
+  // see CONTEXT.md §7 before putting them on any screen that does not
+  // need them.
+  category String? // GENERAL / OBC / SC / ST / EWS
+  religion String?
+
+  address String?
+  city    String?
+  pincode String?
+
+  admittedOn DateTime?
+  status     StudentStatus @default(ACTIVE)
+
+  // Why they left, and when. TC details live on TransferCertificate.
+  leftOn DateTime?
+
+  guardians   Guardian[]
+  enrollments Enrollment[]
+  concessions Concession[]
+  demands     FeeDemand[]
+  receipts    Receipt[]
+  tc          TransferCertificate?
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([schoolId, admissionNo])
+  @@index([schoolId, status])
+  @@index([schoolId, firstName])
+}
+
+enum Relation {
+  FATHER
+  MOTHER
+  GUARDIAN
+}
+
+model Guardian {
+  id        String  @id @default(cuid())
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  relation Relation
+  name     String
+  phone    String
+  email    String?
+  occupation String?
+
+  // The number fee reminders and attendance alerts go to. Exactly one
+  // guardian per student should be primary.
+  isPrimary Boolean @default(false)
+
+  // DPDP Act 2023: processing a child's personal data requires
+  // VERIFIABLE consent from a parent or lawful guardian. Record when
+  // and how it was obtained. See CONTEXT.md §7 — this is not optional
+  // and it is stricter for children than for adults.
+  consentGivenAt DateTime?
+  consentMethod  String? // "admission form", "signed undertaking"
+
+  // Separate opt-in for non-essential messages.
+  messagingConsent Boolean @default(false)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([studentId])
+  @@index([phone])
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  PROMOTED
+  DETAINED
+  TRANSFERRED
+  WITHDRAWN
+}
+
+// A student's place in one class, in one academic year. Everything that
+// happens during a year hangs off this, not off Student.
+model Enrollment {
+  id String @id @default(cuid())
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  sectionId String
+  section   Section @relation(fields: [sectionId], references: [id])
+
+  // Roll number is per section per year and gets reassigned annually.
+  rollNo Int?
+
+  status EnrollmentStatus @default(ACTIVE)
+
+  attendance Attendance[]
+  marks      Mark[]
+  demands    FeeDemand[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One enrollment per student per year. A mid-year section change is
+  // an update, not a second row.
+  @@unique([studentId, academicYearId])
+  @@unique([sectionId, academicYearId, rollNo])
+  @@index([academicYearId, sectionId])
+}
+
+// ===============================================================
+// Fees
+//
+// The model, in one line:
+//   FeeStructure (what a class owes)  ->  FeeDemand (what THIS student
+//   owes, after concession)  ->  Receipt + Allocation (what was paid
+//   against which demand).
+//
+// Never add a "balance" column to Student. Outstanding is always
+// sum(demands.net) - sum(allocations.amount), computed.
+// ===============================================================
+
+enum FeeFrequency {
+  ONE_TIME // admission fee, caution money
+  MONTHLY
+  QUARTERLY
+  HALF_YEARLY
+  ANNUAL
+}
+
+model FeeHead {
+  id       String @id @default(cuid())
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  name String // "Tuition", "Transport", "Exam", "Annual charges"
+  code String?
+
+  // Refundable heads (caution money, security deposit) behave
+  // differently at TC time — they come back to the parent.
+  refundable Boolean @default(false)
+
+  // Late fee heads are generated by the system, not billed up front.
+  isLateFee Boolean @default(false)
+
+  structureItems FeeStructureItem[]
+  demandLines    FeeDemandLine[]
+  concessions    Concession[]
+
+  active    Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([schoolId, name])
+}
+
+// What one class pays in one year.
+model FeeStructure {
+  id String @id @default(cuid())
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  klassId String
+  klass   Klass  @relation(fields: [klassId], references: [id])
+
+  items FeeStructureItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([academicYearId, klassId])
+}
+
+model FeeStructureItem {
+  id          String       @id @default(cuid())
+  structureId String
+  structure   FeeStructure @relation(fields: [structureId], references: [id])
+
+  feeHeadId String
+  feeHead   FeeHead @relation(fields: [feeHeadId], references: [id])
+
+  // Amount PER OCCURRENCE. A monthly tuition of 2000 means 2000 each
+  // month, not 2000 a year. The generator multiplies by frequency.
+  amount    Decimal      @db.Decimal(12, 2)
+  frequency FeeFrequency
+
+  @@unique([structureId, feeHeadId])
+}
+
+// The billing calendar: "Quarter 1, due 10 April". Demands are generated
+// against these so every student in a year shares due dates.
+model FeeInstallment {
+  id String @id @default(cuid())
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  name   String // "April", "Quarter 1", "Term 1"
+  seq    Int
+  dueOn  DateTime
+
+  // Grace period before late fee applies.
+  lateFeeAfterDays Int     @default(0)
+  lateFeePerDay    Decimal @default(0) @db.Decimal(10, 2)
+  lateFeeMax       Decimal @default(0) @db.Decimal(10, 2)
+
+  demands FeeDemand[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([academicYearId, seq])
+}
+
+enum ConcessionReason {
+  RTE // Right to Education 25% quota — state reimbursed
+  SIBLING
+  STAFF_WARD
+  MERIT
+  EWS
+  SINGLE_PARENT
+  MANAGEMENT
+  OTHER
+}
+
+enum ConcessionType {
+  PERCENT
+  AMOUNT
+}
+
+// A standing discount for one student. Applied when demands are
+// generated and recorded on the demand line, so changing a concession
+// later never silently rewrites bills already raised.
+model Concession {
+  id        String  @id @default(cuid())
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  // Null feeHeadId means "all heads".
+  feeHeadId String?
+  feeHead   FeeHead? @relation(fields: [feeHeadId], references: [id])
+
+  type   ConcessionType
+  value  Decimal        @db.Decimal(10, 2)
+  reason ConcessionReason
+
+  note String?
+
+  // Authorisation matters — concessions are where school money leaks.
+  approvedById String?
+  approvedAt   DateTime?
+
+  validFrom DateTime?
+  validTo   DateTime?
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([studentId])
+}
+
+enum DemandStatus {
+  OPEN
+  PART_PAID
+  PAID
+  WAIVED
+  CANCELLED
+}
+
+// What one student owes for one installment. Immutable once generated,
+// apart from status and the late-fee line.
+model FeeDemand {
+  id String @id @default(cuid())
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  enrollmentId String
+  enrollment   Enrollment @relation(fields: [enrollmentId], references: [id])
+
+  installmentId String
+  installment   FeeInstallment @relation(fields: [installmentId], references: [id])
+
+  dueOn DateTime
+
+  lines       FeeDemandLine[]
+  allocations ReceiptAllocation[]
+
+  // Totals, stored. Recomputing from lines on every list query is slow
+  // and these never change after generation.
+  gross      Decimal @db.Decimal(12, 2)
+  concession Decimal @default(0) @db.Decimal(12, 2)
+  lateFee    Decimal @default(0) @db.Decimal(12, 2)
+  net        Decimal @db.Decimal(12, 2)
+  paid       Decimal @default(0) @db.Decimal(12, 2)
+
+  status DemandStatus @default(OPEN)
+
+  waivedReason String?
+  cancelledAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One demand per student per installment. Regenerating must not
+  // double-bill.
+  @@unique([studentId, installmentId])
+  @@index([enrollmentId, status])
+  @@index([dueOn, status])
+}
+
+model FeeDemandLine {
+  id       String    @id @default(cuid())
+  demandId String
+  demand   FeeDemand @relation(fields: [demandId], references: [id])
+
+  feeHeadId String
+  feeHead   FeeHead @relation(fields: [feeHeadId], references: [id])
+
+  // Snapshot of the head's name at generation time. A renamed fee head
+  // must not change last year's receipts.
+  description String
+
+  gross      Decimal @db.Decimal(12, 2)
+  concession Decimal @default(0) @db.Decimal(12, 2)
+  net        Decimal @db.Decimal(12, 2)
+
+  // Why the discount was given, copied from Concession so the receipt
+  // can show "RTE concession" years later.
+  concessionReason String?
+
+  @@index([demandId])
+}
+
+enum PaymentMode {
+  CASH
+  UPI
+  CARD
+  CHEQUE
+  BANK_TRANSFER
+  ONLINE // payment gateway
+  DD
+}
+
+// Money received. Receipt numbers are sequential and gapless per school
+// per academic year — a missing number is an audit question.
+model Receipt {
+  id       String @id @default(cuid())
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id])
+
+  number String // "RCPT/2026-27/00042"
+
+  amount Decimal     @db.Decimal(12, 2)
+  mode   PaymentMode
+
+  // Cheque number, UPI reference, gateway transaction id.
+  reference String?
+
+  // Cheques can bounce. A bounced cheque reverses the allocation and
+  // usually attracts a charge.
+  bouncedAt     DateTime?
+  bouncedReason String?
+
+  collectedById String?
+  collectedBy   Staff?  @relation(fields: [collectedById], references: [id])
+
+  allocations ReceiptAllocation[]
+
+  // Cancelled, never deleted. The number is NOT reused.
+  cancelledAt     DateTime?
+  cancelledReason String?
+
+  receivedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@unique([academicYearId, number])
+  @@index([studentId])
+  @@index([receivedAt])
+}
+
+// Which demand each rupee of a receipt settled. This is what makes
+// "why does the app say I owe 4,500?" answerable.
+model ReceiptAllocation {
+  id        String  @id @default(cuid())
+  receiptId String
+  receipt   Receipt @relation(fields: [receiptId], references: [id])
+
+  demandId String
+  demand   FeeDemand @relation(fields: [demandId], references: [id])
+
+  amount Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@unique([receiptId, demandId])
+  @@index([demandId])
+}
+
+// ===============================================================
+// Attendance
+// ===============================================================
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  LEAVE // approved
+  HALF_DAY
+  HOLIDAY
+}
+
+model Attendance {
+  id String @id @default(cuid())
+
+  enrollmentId String
+  enrollment   Enrollment @relation(fields: [enrollmentId], references: [id])
+
+  // Date only, no time. Period-wise attendance is a college feature and
+  // is deliberately out of scope — see CONTEXT.md §3.
+  onDate DateTime
+
+  status AttendanceStatus
+
+  markedById String?
+  markedBy   Staff?  @relation(fields: [markedById], references: [id])
+
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One record per student per day. Re-marking updates, never appends.
+  @@unique([enrollmentId, onDate])
+  @@index([onDate])
+}
+
+// Days the school is shut. Excluded from attendance percentage, which
+// matters because boards require a minimum attendance to sit exams.
+model Holiday {
+  id             String   @id @default(cuid())
+  academicYearId String
+  onDate         DateTime
+  name           String
+
+  @@unique([academicYearId, onDate])
+}
+
+// ===============================================================
+// Exams
+// ===============================================================
+
+enum ExamType {
+  UNIT_TEST
+  TERM
+  PRE_BOARD
+  ANNUAL
+  PRACTICAL
+}
+
+model Exam {
+  id String @id @default(cuid())
+
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+
+  name String // "Term 1", "Unit Test 2"
+  type ExamType
+  seq  Int
+
+  // Weight toward the final report card, as a percentage.
+  weightPercent Decimal @default(0) @db.Decimal(5, 2)
+
+  // Results are hidden from report cards until published, so teachers
+  // can enter marks over several days without parents seeing drafts.
+  publishedAt DateTime?
+
+  papers ExamPaper[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([academicYearId, name])
+}
+
+model ExamPaper {
+  id     String @id @default(cuid())
+  examId String
+  exam   Exam   @relation(fields: [examId], references: [id])
+
+  klassId String
+  klass   Klass  @relation(fields: [klassId], references: [id])
+
+  subjectId String
+  subject   Subject @relation(fields: [subjectId], references: [id])
+
+  maxMarks  Decimal  @db.Decimal(6, 2)
+  passMarks Decimal  @db.Decimal(6, 2)
+  heldOn    DateTime?
+
+  marks Mark[]
+
+  @@unique([examId, klassId, subjectId])
+}
+
+model Mark {
+  id String @id @default(cuid())
+
+  enrollmentId String
+  enrollment   Enrollment @relation(fields: [enrollmentId], references: [id])
+
+  paperId String
+  paper   ExamPaper @relation(fields: [paperId], references: [id])
+
+  // Null with absent=true means the student did not sit the paper.
+  // ABSENT IS NOT ZERO — it changes averages, pass/fail and the report
+  // card, and conflating the two is a real-world complaint.
+  obtained Decimal? @db.Decimal(6, 2)
+  absent   Boolean  @default(false)
+
+  // CBSE co-scholastic subjects are graded A/B/C, not marked.
+  grade String?
+
+  remark String?
+
+  enteredById String?
+  enteredAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([enrollmentId, paperId])
+  @@index([paperId])
+}
+
+// ===============================================================
+// Documents and communication
+// ===============================================================
+
+// Legally required when a student leaves. Numbered, never deleted, and
+// most schools will not issue one until dues are cleared.
+model TransferCertificate {
+  id        String  @id @default(cuid())
+  studentId String  @unique
+  student   Student @relation(fields: [studentId], references: [id])
+
+  number String
+
+  issuedOn   DateTime
+  lastClass  String
+  reason     String?
+  conduct    String? // "Satisfactory", "Good"
+  duesCleared Boolean @default(false)
+
+  issuedById String?
+  createdAt  DateTime @default(now())
+}
+
+enum MessageChannel {
+  WHATSAPP
+  SMS
+  EMAIL
+}
+
+enum MessageKind {
+  FEE_REMINDER
+  ABSENCE_ALERT
+  RESULT_PUBLISHED
+  ANNOUNCEMENT
+}
+
+// Every message sent to a guardian. Kept so "we never told you" can be
+// answered, and so reminders are not sent twice.
+model MessageLog {
+  id       String @id @default(cuid())
+  schoolId String
+
+  studentId  String?
+  guardianId String?
+  toPhone    String
+
+  channel MessageChannel
+  kind    MessageKind
+
+  body String?
+
+  sentAt    DateTime?
+  failedAt  DateTime?
+  failReason String?
+
+  createdAt DateTime @default(now())
+
+  @@index([schoolId, createdAt])
+  @@index([studentId, kind])
+}
+
+// ===============================================================
+// Audit
+// ===============================================================
+
+// Who saw or changed what. This is children's data and money; reads
+// matter as much as writes.
+model AuditLog {
+  id       String @id @default(cuid())
+  schoolId String
+  school   School @relation(fields: [schoolId], references: [id])
+
+  staffId String?
+  staff   Staff?  @relation(fields: [staffId], references: [id])
+
+  action     String // "student.view", "receipt.cancel", "marks.update"
+  entityType String
+  entityId   String
+
+  before Json?
+  after  Json?
+
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([schoolId, createdAt])
+  @@index([entityType, entityId])
+}
