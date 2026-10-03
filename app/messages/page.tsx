@@ -15,7 +15,7 @@ import { Form, Submit } from "@/app/form";
 import { Panel, PageHeader, Stat, input, label, btnPrimary, th, td, TableHead } from "@/app/ui";
 
 export default async function MessagesPage() {
-  await requireRole(CAN_HANDLE_MONEY);
+  const session = await requireRole(CAN_HANDLE_MONEY);
   const year = await currentAcademicYear();
 
   const configured = isConfigured() && Boolean(feeTemplate());
@@ -50,11 +50,33 @@ export default async function MessagesPage() {
     else unreachable.add(d.studentId);
   }
 
+  // MessageLog carries a studentId but has no relation to Student —
+  // a log row must survive the student being removed, so it is a
+  // loose reference rather than a foreign key. That means no
+  // `include`; the names are fetched separately and joined here.
   const recent = await db.messageLog.findMany({
+    where: { schoolId: session.schoolId },
     orderBy: { createdAt: "desc" },
     take: 25,
-    include: { student: { select: { firstName: true, lastName: true } } },
   });
+
+  const namedStudents = await db.student.findMany({
+    where: {
+      schoolId: session.schoolId,
+      id: {
+        in: [
+          ...new Set(
+            recent
+              .map((m) => m.studentId)
+              .filter((id): id is string => Boolean(id))
+          ),
+        ],
+      },
+    },
+    select: { id: true, firstName: true, lastName: true },
+  });
+
+  const nameById = new Map(namedStudents.map((s) => [s.id, studentName(s)]));
 
   return (
     <div className="mx-auto max-w-3xl space-y-8">
@@ -169,7 +191,7 @@ export default async function MessagesPage() {
                     className="border-b border-[var(--color-line)] last:border-0"
                   >
                     <td className={td}>
-                      {m.student ? studentName(m.student) : "—"}
+                      {m.studentId ? (nameById.get(m.studentId) ?? "—") : "—"}
                     </td>
                     <td className={`${td} text-[var(--color-muted)]`}>
                       {m.kind.toLowerCase().replace("_", " ")}
