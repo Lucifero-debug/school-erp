@@ -269,7 +269,7 @@ export async function GET(req: Request) {
           // Never export password hashes.
           select: {
             id: true, name: true, phone: true, role: true,
-            qualification: true, registrationNo: true, active: true,
+            qualification: true, designation: true, active: true,
           },
         }),
         db.klass.findMany({ where: { schoolId }, include: { sections: true } }),
